@@ -500,3 +500,172 @@ Dependency conflicts generate blocking warnings that must be acknowledged by the
 | Business stakeholders | Significant releases | Pre-release + post-completion | Email |
 | Customer support | Customer-visible changes | Pre-release | Internal wiki + email |
 | Customers | Customer-visible changes | Release notes | Product blog + email |
+
+---
+
+## Database Migration Safety
+
+Database schema changes are among the highest-risk operations in the release lifecycle. Unlike application code, schema changes are often irreversible within the rollback window, affect shared infrastructure, and can cause downtime or data corruption if sequenced incorrectly. This section defines the governance model, sequencing patterns, and automated gates required to release schema migrations safely alongside application deployments.
+
+### Why Database Migrations Fail in Production
+
+The most common failure modes for schema migrations at release time:
+
+| Failure Mode | Description |
+|---|---|
+| Long-table lock | An `ALTER TABLE` on a large table acquires an exclusive lock, causing cascading timeouts and downtime |
+| Code/schema version mismatch | Application code referencing a column that does not yet exist (forward deploy) or no longer exists (failed rollback) |
+| Missing rollback path | Destructive migration (column drop, table rename) deployed without a verified reverse migration |
+| Data truncation | Reducing a column's width or changing its type silently truncates or rejects existing data |
+| Index build blocking writes | Foreground index creation blocks writes on the target table during construction |
+| Constraint violation on existing data | Adding a NOT NULL constraint or foreign key to a column that contains violating rows fails mid-migration |
+
+### The Expand-Contract Pattern
+
+The expand-contract (also called parallel-change) pattern is the foundational technique for zero-downtime schema migrations when both old and new application versions must coexist during a deployment window.
+
+**Three-phase sequence:**
+
+```
+Phase 1: EXPAND
+  - Add the new column, table, or constraint (additive only)
+  - New application code writes to both old and new structures
+  - Old application code continues to function — no breaking change
+  - Deploy application version N+1
+
+Phase 2: MIGRATE
+  - Backfill data from old to new structure in batches
+  - Run concurrently with production traffic; batch size tuned to avoid lock contention
+  - Validate row counts and data integrity after each batch
+
+Phase 3: CONTRACT
+  - Remove the old column, table, or constraint (destructive step)
+  - Only permitted after application version N+1 is verified stable in production
+  - Deploy as a separate release from Phase 1 — minimum 24-hour separation recommended
+```
+
+**Prohibited patterns (require waiver and compensating controls):**
+
+- Combined expand + contract in a single release
+- `ALTER TABLE` with `ADD COLUMN NOT NULL` without a default value on tables with > 100k rows
+- `DROP COLUMN` in the same release as the application code stop referencing it
+- `RENAME TABLE` or `RENAME COLUMN` without aliasing during transition
+
+### Migration Classification and Gates
+
+Each migration must be classified before it enters the release pipeline:
+
+| Class | Definition | Automated Gate | Approval Requirement |
+|---|---|---|---|
+| **Class A — Additive** | Adds columns, tables, indexes (non-blocking) | Schema linter pass | Standard release approval |
+| **Class B — Transformative** | Backfills, constraint changes, type changes | Schema linter + backfill plan review | Senior engineer sign-off |
+| **Class C — Destructive** | Drops columns, tables; renames | Schema linter + expand phase verified complete | Release manager + DBA sign-off |
+| **Class D — Locking** | Long-running `ALTER TABLE` estimated > 30s on target table | Must be converted to Class A using online DDL | Architecture review |
+
+**Schema linter checks (automated, required for all migrations):**
+
+```sql
+-- Example: automated linter checks in CI
+-- 1. Detect ADD COLUMN NOT NULL without default on non-empty tables
+SELECT COUNT(*) FROM information_schema.columns
+WHERE table_schema = :target_schema
+  AND column_name = :new_column
+  AND is_nullable = 'NO'
+  AND column_default IS NULL;
+
+-- 2. Detect foreground index creation (must use CREATE INDEX CONCURRENTLY)
+-- Migration file text scanned for: CREATE INDEX (not CONCURRENTLY)
+-- Result: blocking error in CI
+
+-- 3. Detect DROP TABLE or DROP COLUMN in same migration as application deploy
+-- Cross-referenced with git diff of application code in same PR
+```
+
+### Migration Sequencing in the Release Pipeline
+
+Database migrations must be sequenced explicitly within the deployment pipeline:
+
+```
+[CI: Migration Lint] → [Review Gate] → [Deploy to Staging]
+        ↓
+[Run Migration in Staging] → [Automated Integrity Validation]
+        ↓
+[Production Deploy Gate] ──────────────────────────────────┐
+        ↓                                                   │
+[Pre-deploy: Backup verification]                           │
+        ↓                                                   │
+[Run Migration in Production (Phase 1 or 2)]               │
+        ↓                                                   │
+[Health check: application + DB connection pool]            │
+        ↓                                                   │
+[Deploy application code]                                   │
+        ↓                                                   │
+[Post-deploy validation: row counts, query latency P95]    ←┘
+```
+
+**Ordering rule:** Migration runs before application code deployment in forward direction. For rollback, application code reverts first, migration rollback second (unless the migration is additive and backwards-compatible).
+
+### Rollback Strategy for Migrations
+
+| Migration Class | Rollback Approach | Rollback Time |
+|---|---|---|
+| Class A — Additive | Application rollback only; leave schema change in place (backwards-compatible) | Minutes |
+| Class B — Transformative | Reverse migration script required; must be tested in staging | 10–60 min depending on row count |
+| Class C — Destructive | **No rollback possible after contract phase.** Rollback window closes permanently when Phase 3 is applied | N/A |
+| Class D — Locking | Blocked from reaching production; must be reclassified | N/A |
+
+Class C migrations must be marked with an explicit `POINT_OF_NO_RETURN` annotation in the migration file and require a separate deployment with a minimum 24-hour stabilization window after the expand phase.
+
+### Automated Validation Checks
+
+Run the following checks after every migration in staging and production:
+
+```bash
+#!/bin/bash
+# post-migration-validation.sh
+
+# 1. Verify row counts are within expected range (no silent data loss)
+EXPECTED_COUNT=$(cat migration-manifest.json | jq '.expected_row_count')
+ACTUAL_COUNT=$(psql "$DB_URL" -t -c "SELECT COUNT(*) FROM $TARGET_TABLE;")
+if [ "$ACTUAL_COUNT" -lt "$((EXPECTED_COUNT * 95 / 100))" ]; then
+  echo "ERROR: Row count below 95% of expected. Possible data loss." && exit 1
+fi
+
+# 2. Verify no long-running transactions held open during migration
+psql "$DB_URL" -c "
+  SELECT pid, now() - pg_stat_activity.query_start AS duration, query
+  FROM pg_stat_activity
+  WHERE (now() - pg_stat_activity.query_start) > interval '30 seconds'
+    AND state = 'active';
+"
+
+# 3. Verify connection pool health
+curl -sf "$APP_HEALTH_ENDPOINT" | jq '.db.pool_available > 0' || exit 1
+
+# 4. Check query latency on migrated table (P95 < baseline + 20%)
+psql "$DB_URL" -c "
+  SELECT mean_exec_time, calls
+  FROM pg_stat_statements
+  WHERE query LIKE '%$TARGET_TABLE%'
+  ORDER BY mean_exec_time DESC LIMIT 10;
+"
+```
+
+### Tooling Guidance
+
+| Tool | Use Case | Notes |
+|------|----------|-------|
+| **Flyway** | SQL-based migration versioning | Strong baseline for teams using raw SQL; integrates with most CI systems |
+| **Liquibase** | XML/YAML/SQL migrations with rollback support | Better rollback tooling than Flyway; enterprise license for some advanced features |
+| **gh-ost** (GitHub Online Schema Change) | Online DDL for MySQL large tables | Eliminates locking on ALTER TABLE for InnoDB; production-proven at scale |
+| **pgroll** | Zero-downtime PostgreSQL migrations with expand-contract automation | Native multi-version schema support; recommended for teams on PostgreSQL |
+| **Atlas** | Schema-as-code with automated drift detection | Useful for IaC-style schema management; integrates with Terraform |
+
+### Compliance Considerations
+
+For systems subject to SOX, PCI-DSS, or SOC 2:
+
+- All schema changes must have an associated change record in the ITSM system (linked to the migration file commit SHA)
+- Evidence of pre-production testing (migration execution log from staging) must be attached to the change record
+- Class C (destructive) migrations require a second approver who is independent of the engineering team that authored the migration
+- Migration execution logs must be retained for the compliance evidence retention period (typically 7 years for SOX)
