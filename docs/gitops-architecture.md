@@ -811,6 +811,225 @@ Add an emergency bypass via label:
 
 ---
 
+## GitOps Disaster Recovery
+
+GitOps makes disaster recovery fundamentally more tractable: the desired state is already defined in Git, and the recovery procedure is to reinstantiate the reconciliation machinery and let it converge. However, "reinstantiate the reconciliation machinery" involves several non-trivial bootstrapping steps that must be designed and tested before an incident occurs.
+
+### Disaster Scenarios and RTO Targets
+
+| Scenario | Description | Target RTO | Primary Recovery Path |
+|----------|-------------|------------|----------------------|
+| **Single cluster failure** | Cluster becomes unresponsive; nodes lost | 30–60 min | Provision replacement cluster; bootstrap GitOps controller; apply config repo |
+| **Region failure** | AWS/Azure/GCP region outage affecting cluster | 60–120 min | Provision cluster in alternate region; promote standby from config repo |
+| **Config repo corruption** | Malicious or accidental force-push destroys history | 15–30 min | Restore from protected backup; no cluster changes needed |
+| **GitOps controller compromise** | ArgoCD/Flux compromised or misconfigured | 20–45 min | Redeploy controller from known-good image; reconnect to config repo |
+| **Secrets backend failure** | Vault cluster unavailable; external secrets sync stops | 10–30 min | Promote from Vault DR replica or restore from backup; re-trigger ESO sync |
+
+---
+
+### The Secrets Bootstrapping Problem
+
+The most common barrier to GitOps disaster recovery is circular dependency: the GitOps controller needs credentials to pull from the config repo, but those credentials are stored in the secrets manager, and the secrets manager needs to be operational before anything else can run.
+
+Resolve this before an incident by designing an explicit bootstrapping sequence:
+
+```
+Cluster bootstrap order:
+1. Cloud provider identity (IRSA on EKS, Workload Identity on GKE, Managed Identity on AKS)
+   └── No credentials required — bound to cluster instance identity
+
+2. Secrets manager access (Vault agent / External Secrets Operator)
+   └── Authenticate using cloud provider identity from step 1
+   └── This is the only identity that must work before everything else
+
+3. Git credentials (SSH deploy key or GitHub App private key)
+   └── Fetched from secrets manager — NOT stored in cluster or plaintext
+
+4. GitOps controller bootstrap (ArgoCD / Flux)
+   └── Uses Git credentials from step 3
+   └── Reconciles all remaining cluster state from config repo
+
+5. Application workloads
+   └── Pull their secrets from the secrets manager directly via ESO or Vault agent
+```
+
+**Implementation requirement:** Steps 1–3 must be automatable without human credential entry. If any step requires a human to paste a secret, the procedure will fail at 3am during a real incident.
+
+---
+
+### Cluster Bootstrap Procedure (ArgoCD)
+
+Store this procedure in a runbook (not only in this document) accessible to on-call engineers without cluster access.
+
+**Prerequisites:**
+- Cloud provider CLI configured for the target account/project
+- `kubectl`, `helm`, and `argocd` CLIs installed
+- Access to the Git config repository
+
+```bash
+#!/usr/bin/env bash
+# cluster-bootstrap.sh — Run after provisioning a new cluster
+# Requires: kubectl context pointing to the new cluster
+set -euo pipefail
+
+CLUSTER_NAME="${1:?Usage: cluster-bootstrap.sh <cluster-name> <environment>}"
+ENVIRONMENT="${2:?Usage: cluster-bootstrap.sh <cluster-name> <environment>}"
+CONFIG_REPO="git@github.com:<org>/gitops-config.git"
+ARGOCD_VERSION="v2.11.0"  # Pin to known-good version
+
+echo "==> [1/6] Installing ArgoCD"
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -n argocd \
+  -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+kubectl -n argocd rollout status deployment argocd-server --timeout=300s
+
+echo "==> [2/6] Configuring cloud provider identity for secrets access"
+# EKS example: annotate the ArgoCD service account for IRSA
+kubectl annotate serviceaccount -n argocd argocd-application-controller \
+  "eks.amazonaws.com/role-arn=arn:aws:iam::<ACCOUNT_ID>:role/argocd-secrets-reader"
+
+echo "==> [3/6] Fetching Git deploy key from secrets manager"
+# Pull the SSH deploy key using the cloud identity (no human credential needed)
+GIT_SSH_KEY=$(aws secretsmanager get-secret-value \
+  --secret-id "gitops/${CLUSTER_NAME}/git-deploy-key" \
+  --query SecretString --output text)
+
+kubectl create secret generic argocd-repo-creds \
+  -n argocd \
+  --from-literal=sshPrivateKey="${GIT_SSH_KEY}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+echo "==> [4/6] Registering config repository"
+argocd repo add "${CONFIG_REPO}" \
+  --ssh-private-key-path /dev/stdin <<< "${GIT_SSH_KEY}" \
+  --insecure-ignore-host-key
+
+echo "==> [5/6] Applying bootstrap Application (App of Apps)"
+kubectl apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bootstrap
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ${CONFIG_REPO}
+    targetRevision: HEAD
+    path: clusters/${ENVIRONMENT}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+EOF
+
+echo "==> [6/6] Waiting for bootstrap sync"
+argocd app wait bootstrap --sync --health --timeout 600
+
+echo "Bootstrap complete. Cluster ${CLUSTER_NAME} (${ENVIRONMENT}) is reconciling from Git."
+```
+
+**Post-bootstrap verification:**
+```bash
+# Verify all applications are healthy
+argocd app list --output wide | grep -v Healthy
+
+# Verify secrets are syncing
+kubectl get externalsecrets -A | grep -v SecretSynced
+
+# Verify all pods are running
+kubectl get pods -A | grep -v Running | grep -v Completed
+```
+
+---
+
+### Flux Bootstrap Procedure
+
+For clusters managed by Flux, recovery uses `flux bootstrap`:
+
+```bash
+# Flux cluster recovery
+# Prereqs: kubectl context, GitHub token in GITHUB_TOKEN, SOPS age key available
+
+echo "==> [1/4] Bootstrap Flux on new cluster"
+flux bootstrap github \
+  --owner=<org> \
+  --repository=gitops-config \
+  --branch=main \
+  --path=clusters/${ENVIRONMENT} \
+  --personal=false \
+  --token-auth=false    # Uses GitHub App (preferred) not PAT
+
+echo "==> [2/4] Restore SOPS decryption key"
+# The SOPS age key must be injected before Flux can decrypt Secrets
+AGE_KEY=$(aws secretsmanager get-secret-value \
+  --secret-id "gitops/${CLUSTER_NAME}/sops-age-key" \
+  --query SecretString --output text)
+
+kubectl create secret generic sops-age \
+  -n flux-system \
+  --from-literal=age.agekey="${AGE_KEY}"
+
+echo "==> [3/4] Force reconcile to pick up SOPS key"
+flux reconcile kustomization flux-system --with-source
+
+echo "==> [4/4] Monitor reconciliation"
+flux get all -A --status-selector ready=false
+```
+
+---
+
+### Config Repository Recovery
+
+If the config repository is corrupted (force-push, malicious commit, accidental deletion), restore from the protected backup:
+
+**Config repo backup policy:**
+- Mirror the config repository to an isolated backup location (separate GitHub org, GitLab project, or S3-backed bare clone) every 24 hours.
+- The backup location must be protected from write access by the same identities that have write access to the primary repo — otherwise a compromised pipeline that can push to the primary can also destroy the backup.
+- Retain 90 days of daily snapshots.
+
+```bash
+# Automated daily backup — run as a scheduled GitHub Actions workflow
+# in a SEPARATE repository from the config repo
+
+- name: Mirror config repo to backup
+  run: |
+    git clone --mirror git@github.com:<org>/gitops-config.git config-mirror
+    cd config-mirror
+    git remote add backup git@github.com:<backup-org>/gitops-config-backup.git
+    git push --mirror backup
+    echo "Config repo mirrored at $(date -u)"
+```
+
+**Recovery from backup:**
+```bash
+# Restore config repo from backup
+git clone --mirror git@github.com:<backup-org>/gitops-config-backup.git config-restore
+cd config-restore
+git remote set-url origin git@github.com:<org>/gitops-config.git
+git push --mirror origin
+# All clusters will re-sync automatically — no cluster changes needed
+```
+
+---
+
+### Recovery Time Objectives by Scenario
+
+| Scenario | Automated Steps | Manual Steps | Realistic RTO |
+|----------|----------------|--------------|---------------|
+| Cluster replacement (same region) | Provision cluster (IaC), run bootstrap script | Verify health post-recovery | 35–50 min |
+| Cluster replacement (alternate region) | Provision cluster, update DNS/load balancer, bootstrap | Coordinate traffic shift | 60–90 min |
+| GitOps controller redeploy | Reapply ArgoCD/Flux install manifest | None | 10–15 min |
+| Config repo restore from backup | Push backup mirror to primary | Repository admin approval | 15–20 min |
+| Secrets backend restore | Promote Vault DR replica | Unseal (if not auto-unseal) | 20–40 min |
+
+**RTO testing requirement:** Execute a full cluster recovery drill at least quarterly. Unexercised runbooks degrade — the first time a procedure is tested should not be during a production incident.
+
+---
+
 ## GitOps Adoption Checklist
 
 Use this checklist before relying on GitOps for production deployments:

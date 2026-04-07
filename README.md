@@ -107,6 +107,8 @@ This framework is designed for the following roles:
 | [Progressive Delivery](docs/progressive-delivery.md) | Canary, blue/green, feature flag, and shadow traffic strategies with automation patterns and rollback orchestration | Platform / DevOps |
 | [GitOps Architecture](docs/gitops-architecture.md) | GitOps release pattern — repo structure, ArgoCD vs Flux, image digest policy, secrets management, promotion pipeline, drift detection | Platform / DevOps |
 | [Implementation](docs/implementation.md) | Phased implementation approach, toolchain selection, pipeline integration, feature flag and rollback configuration | DevOps / Engineering |
+| [Database Migration Safety](docs/database-migration-safety.md) | Migration risk classification (Class A–D), engine-specific locking behavior, safe migration patterns, pre-migration checklist, and execution runbooks | Platform / DevOps |
+| [Release Incident Playbook](docs/release-incident-playbook.md) | Decision trees and runbooks for failed deployments, canary rejections, database migration failures, and cascading release failures | DevOps / Engineering |
 | [Best Practices](docs/best-practices.md) | 45 best practices across governance, environments, approvals, deployments, rollback, compliance, GitOps, and Kubernetes-native release | All |
 | [Roadmap](docs/roadmap.md) | Foundation → Standardization → Optimization → Innovation milestones, KPIs, and organizational change management | Program Leads |
 
@@ -148,6 +150,17 @@ Teams already operating a release orchestration practice can use the [Best Pract
 8. **Document rollback procedures.** For each service in the pilot, define and test the rollback procedure before it is needed in a real incident.
 
 For regulated environments (SOX, PCI-DSS, SOC 2), prioritize evidence automation from [Framework](docs/framework.md) — generating compliance artifacts at release time eliminates last-minute audit evidence reconstruction.
+
+---
+
+## Learning Resources
+
+The Techstream Book Series and hands-on lab companion extend the concepts in this framework with structured learning, exercises, and deployment pattern walkthroughs.
+
+- **[Book 4: Release Engineering & DevSecOps Governance](https://www.techstream.app/learn)** — The primary book volume aligned with this framework. Covers GitOps, progressive delivery patterns, multi-region release coordination, database migration safety, and release governance for compliance-regulated environments.
+- **[Hands-On Labs (techstream-learn/book-4-release-governance/)](https://www.techstream.app/learn)** — Practical exercises including progressive delivery with feature flags, GitOps configuration management, and database migration safety validation.
+- **[Book Series Overview (VOLUMES.md)](../techstream-books/VOLUMES.md)** — Index of all four Techstream volumes covering DevSecOps foundations, CI/CD security, cloud security, and release governance.
+- **[Techstream Platform](https://www.techstream.app)** — The central portal for all Techstream frameworks, documentation, and learning resources.
 
 ---
 
