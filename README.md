@@ -159,7 +159,7 @@ The Techstream Book Series and hands-on lab companion extend the concepts in thi
 
 - **[Book 4: Release Engineering & DevSecOps Governance](https://www.techstream.app/learn)** — The primary book volume aligned with this framework. Covers GitOps, progressive delivery patterns, multi-region release coordination, database migration safety, and release governance for compliance-regulated environments.
 - **[Hands-On Labs (techstream-learn/book-4-release-governance/)](https://www.techstream.app/learn)** — Practical exercises including progressive delivery with feature flags, GitOps configuration management, and database migration safety validation.
-- **[Book Series Overview (VOLUMES.md)](../techstream-books/VOLUMES.md)** — Index of all four Techstream volumes covering DevSecOps foundations, CI/CD security, cloud security, and release governance.
+- **[Book Series Overview (VOLUMES.md)](../techstream-books/VOLUMES.md)** — Index of all five Techstream volumes covering DevSecOps foundations, CI/CD security, cloud security, release governance, and AI and agentic systems security.
 - **[Techstream Platform](https://www.techstream.app)** — The central portal for all Techstream frameworks, documentation, and learning resources.
 
 ---

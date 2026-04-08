@@ -255,4 +255,120 @@ In multi-region deployments with regional database replicas, schema migrations m
 
 ### 45. Maintain a single artifact promoted across all regions
 
+The same container image or deployment artifact must be used across all environments from staging through production. Environment-specific configuration is injected via environment variables, Kubernetes ConfigMaps, or secrets — never baked into the artifact. Rebuilding an artifact per environment breaks the security guarantee that the artifact in production is the same one that passed security scans and signing in CI. Any deviation — even a "minor" configuration change baked in — invalidates provenance attestations and introduces an unscanned artifact into production.
+
+---
+
+## Approval Workflow Design Patterns
+
+Release approval workflows balance velocity with risk control. A workflow designed only for the 5% high-risk case creates unnecessary friction for the 95% of routine deployments. Design for the 95% case and handle exceptions explicitly.
+
+### Risk-Tiered Approval Design
+
+Define at most three approval tiers. More tiers create decision fatigue and incentivize misclassification into lower tiers.
+
+```
+Tier 1 — Automated approval (no human gate):
+  - Criteria: Change confined to non-critical service, no dependency updates, no infrastructure changes,
+    all CI security gates passed, DAST passed in staging, SBOM attestation present
+  - Implementation: CI pipeline automatically promotes on gate passage
+  - Scope: ~60-70% of deployments (routine feature releases, bug fixes in low-risk services)
+
+Tier 2 — Single approver (asynchronous):
+  - Criteria: Change to critical service, OR dependency update, OR infrastructure change,
+    OR DAST finding acknowledged with exception
+  - Approver: On-call engineer or team lead (not the author)
+  - SLA: 4 business hours
+  - Implementation: GitHub Environments with required reviewers; Slack notification
+  - Scope: ~25-35% of deployments
+
+Tier 3 — Change Advisory Board (synchronous, scheduled):
+  - Criteria: Breaking change, OR major infrastructure modification, OR compliance-regulated system,
+    OR change to authentication/authorization architecture
+  - Approvers: Engineering lead + Security lead + (if applicable) Compliance officer
+  - SLA: Next scheduled CAB window (daily or weekly)
+  - Implementation: Formal change request; meeting record in change management system
+  - Scope: ~5% of deployments
+```
+
+**Implementation in GitHub Actions:**
+```yaml
+# .github/workflows/deploy.yaml
+jobs:
+  classify-deployment:
+    runs-on: ubuntu-latest
+    outputs:
+      tier: ${{ steps.classify.outputs.tier }}
+    steps:
+      - id: classify
+        run: |
+          # Classify based on changed paths and labels
+          if git diff --name-only HEAD~1 | grep -q "infrastructure/"; then
+            echo "tier=3" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 | grep -q "auth/\|security/"; then
+            echo "tier=3" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 | grep -q "requirements.txt\|package.json\|go.mod"; then
+            echo "tier=2" >> $GITHUB_OUTPUT
+          else
+            echo "tier=1" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-tier-1:
+    needs: classify-deployment
+    if: needs.classify-deployment.outputs.tier == '1'
+    runs-on: ubuntu-latest
+    environment: production  # No required reviewers configured
+    steps:
+      - name: Deploy automatically
+        run: ./scripts/deploy.sh production
+
+  deploy-tier-2:
+    needs: classify-deployment
+    if: needs.classify-deployment.outputs.tier == '2'
+    runs-on: ubuntu-latest
+    environment: production-tier2  # Required reviewers: 1 (on-call engineer)
+    steps:
+      - name: Deploy with single approval
+        run: ./scripts/deploy.sh production
+
+  deploy-tier-3:
+    needs: classify-deployment
+    if: needs.classify-deployment.outputs.tier == '3'
+    runs-on: ubuntu-latest
+    environment: production-tier3  # Required reviewers: 2 (engineering lead + security lead)
+    steps:
+      - name: Deploy with CAB approval
+        run: ./scripts/deploy.sh production
+```
+
+### Emergency Change Process
+
+The emergency change process must exist before an emergency occurs. Define it, document it, and test it during non-emergency conditions.
+
+**Emergency criteria (examples — define explicitly for your organization):**
+- Production service below SLA for > 15 minutes with identified fix
+- Active security incident with confirmed exploited vulnerability requiring immediate patch
+- Data integrity issue actively causing corrupted writes to production database
+
+**Emergency process:**
+1. Declare emergency in incident management system (PagerDuty/Opsgenie incident record)
+2. Get verbal approval from on-call incident commander (not the deployer)
+3. Deploy with standard pipeline (do not bypass security gates — these run fast)
+4. File a post-emergency change record within 24 hours documenting: what was deployed, who approved, what the emergency was, what the rollback plan was
+5. Review change record in next CAB meeting
+
+**The "break glass" anti-pattern to avoid:** Creating a separate emergency pipeline that bypasses CI security gates. If gates are too slow for emergencies, fix the gates — don't create an unsecured bypass path that will be misused under pressure.
+
+### Approval Latency Monitoring
+
+Track approval workflow latency by tier as a key DORA-adjacent metric:
+
+| Metric | Tier 1 | Tier 2 | Tier 3 |
+|---|---|---|---|
+| Mean time to deployment | < 20 min | < 4 hours | < 1 CAB cycle |
+| Approval wait time (P95) | N/A | < 2 hours | N/A |
+| Deployment failure rate | < 2% | < 1% | < 0.5% |
+
+A Tier 2 approval wait time that consistently exceeds 4 hours indicates either inadequate reviewer availability or over-classification of deployments into Tier 2. Both are fixable — the metric makes them visible.
+
 The same cryptographically verified artifact (same image digest, same Helm chart version) must be deployed across all regions in a given release. Region-specific variation in which artifact version runs simultaneously — even temporarily — introduces asymmetric behavior that is difficult to diagnose and can cause split-brain conditions in distributed systems. The release orchestration system should enforce artifact identity across all regional deployments before the release is considered complete.
