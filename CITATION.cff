@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: "Release Orchestration Framework"
+message: "If you reference, cite, or build upon this framework, please cite it as below."
+type: software
+authors:
+  - family-names: Sotille
+    given-names: Felipe
+    affiliation: "TechStream (Independent)"
+    email: "fsotille@gmail.com"
+repository-code: "https://github.com/sotille/release-orchestration-framework"
+url: "https://www.techstream.app"
+license: Apache-2.0
+version: "1.0.0"
+date-released: "2026-05-17"
+abstract: >-
+  Enterprise-grade release management: environment promotion strategy, approval workflows, rollback automation, change management integration, and blue/green and canary orchestration patterns. Aligned with NIST CSF 2.0 (PR.DS) and SOC2 CC8.1.
+keywords:
+  - release-engineering
+  - deployment
+  - blue-green
+  - canary
+  - nist-csf-pr-ds
+  - soc2-cc8
+  - change-management
