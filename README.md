@@ -184,6 +184,17 @@ For significant changes to framework content, please open a discussion issue fir
 
 ---
 
+
+---
+
+## Related Publications
+
+The patterns and methodologies in this framework are translated for practitioners in the TechStream article series:
+
+- **"The 4-Phase DevSecOps Transformation: A 90-Day Journey from Policy to Practice"** (Medium, April 2026) — [Read article](https://medium.com/@fsotille/the-4-phase-devsecops-transformation-b9df2ef2e051) — distills the methodology in `devsecops-methodology`.
+
+These articles are designed for U.S. practitioners implementing federal mandates including Executive Order 14028, Executive Order 14306, NIST SP 800-218 (SSDF), and NIST SP 1800-44 (NCCoE DevSecOps Practices, March 2026 preliminary draft).
+
 ## License
 
 Copyright 2024 Techstream
