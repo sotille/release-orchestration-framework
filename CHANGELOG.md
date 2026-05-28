@@ -12,6 +12,33 @@ Format: `[version] — [date] — [summary of changes]`
 - docs/best-practices.md: Completed practice 45 body text; added Approval Workflow Design Patterns section covering risk-tiered approval design (3-tier model with GitHub Actions implementation), emergency change process, and approval latency monitoring metrics (2026-04-07)
 - [2026-04-08] Created docs/dora-reporting-guide.md — DORA metrics collection, calculation, and executive reporting guide: methodology for each of the four metrics (deployment frequency, lead time for changes P50/P90, change failure rate, failed deployment recovery time) with data sources and exclusion rules; DORA performance band reference table (Elite/High/Medium/Low); reporting cadence and audience guide (engineering weekly, engineering monthly, CISO monthly, executive quarterly, annual board); narrative framing templates for each metric; DORA metrics and security controls correlation patterns (which controls increase/decrease which metrics and why); tooling reference table (DORA four-keys, Sleuth, LinearB, Jellyfish, custom GitHub API); five common reporting mistakes (team vs. aggregate, incident count vs. CFR, P50 vs. P90 confusion, lagging indicator attribution, single-day snapshots)
 
+
+---
+
+## [1.0.0] — 2026-05-17
+
+### Added — Governance and Documentation
+
+- `SECURITY.md` — security reporting policy and supported versions
+- `CITATION.cff` — academic and industry citation metadata (CFF v1.2.0)
+- `CODE_OF_CONDUCT.md` — Contributor Covenant v2.1
+- `README.md` "Related Publications" section linking the TechStream article series
+
+### Federal-standards alignment (this release)
+
+- Continued alignment with Executive Order 14028 (Improving the Nation's Cybersecurity)
+- Continued alignment with Executive Order 14306 (June 2025)
+- Continued alignment with NIST SP 800-218 (SSDF) v1.1
+- Acknowledgment of NIST SP 1800-44 (NCCoE DevSecOps Practices) preliminary draft, March 2026
+
+### Related publications referenced in this release
+
+  - "The 4-Phase DevSecOps Transformation" (Medium, April 2026)
+
+### Changed
+
+- Documentation cross-references updated to reflect the public TechStream framework portfolio at https://github.com/sotille
+
 ## [1.0.0] — 2024-01-15
 
 - Initial public release of the Release Orchestration Framework
